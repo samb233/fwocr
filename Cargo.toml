@@ -6,3 +6,8 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
+windows = { version = "0.51.1", features = ["Graphics_Imaging", "Media_Ocr", "Foundation", "Win32_System_WinRT", "Foundation_Collections", "Globalization", "System_UserProfile"]}
+anyhow = "1.0.75"
+ffmpeg-next = "6.0.0"
+futures = "0.3.29"
+clap = { version = "4.4.8", features = ["derive"] }
