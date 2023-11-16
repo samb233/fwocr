@@ -50,6 +50,11 @@ struct FrameMsg {
     frame: Video,
 }
 
+struct SubMsg {
+    index: usize,
+    sub: String,
+}
+
 fn decode_video_and_ocr() -> Result<()> {
     ffmpeg::init().unwrap();
 
@@ -79,12 +84,15 @@ fn decode_video_and_ocr() -> Result<()> {
         // let mut receiver_vec: Vec<Receiver<FrameMsg>> = Vec::new();
         let mut sender_vec: Vec<Sender<FrameMsg>> = Vec::new();
 
+        let (sub_sender, sub_receiver) = mpsc::channel();
+
         for _ in 0..process {
             let (sender, receiver) = mpsc::channel();
             sender_vec.push(sender);
-            // receiver_vec.push(receiver);
 
-            thread::spawn(|| -> Result<()> {
+            let sub_sender_n = sub_sender.clone();
+
+            thread::spawn(move || -> Result<()> {
                 let zh_tw = OcrEngine::AvailableRecognizerLanguages()
                     .unwrap()
                     .GetAt(1)
@@ -98,13 +106,30 @@ fn decode_video_and_ocr() -> Result<()> {
 
                 for msg in receiver {
                     let result =
-                        futures::executor::block_on(do_ocr(&engine, &msg.frame, msg.index))?;
-                    println!("{:?}", result);
+                        futures::executor::block_on(do_ocr(&engine, &msg.frame))?;
+
+                    let sub_msg = SubMsg {
+                        index: msg.index,
+                        sub: result,
+                    };
+
+                    sub_sender_n.send(sub_msg).unwrap();
                 }
 
                 Ok(())
             });
         }
+
+        thread::spawn(move || {
+            for msg in sub_receiver {
+                println!("index: {}, sub: {}", msg.index, msg.sub);
+            }
+
+            // TODO:
+            // 1. 文字后处理
+            // 2. 存入到数组
+            // 3. 当计数每一帧都处理之后，结束当前线程
+        });
 
         let mut decoder = context_decoder.decoder().video()?;
 
@@ -158,12 +183,8 @@ fn decode_video_and_ocr() -> Result<()> {
     Ok(())
 }
 
-async fn do_ocr(
-    engine: &OcrEngine,
-    frame: &Video,
-    index: usize,
-) -> std::result::Result<String, std::io::Error> {
-    println!("{:?}", index);
+async fn do_ocr(engine: &OcrEngine, frame: &Video) -> std::result::Result<String, std::io::Error> {
+    // println!("{:?}", index);
 
     let rgb = frame.data(0);
     let width = 960;
