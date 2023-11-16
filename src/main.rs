@@ -4,6 +4,7 @@ use ffmpeg::format::{input, Pixel};
 use ffmpeg::media::Type;
 use ffmpeg::software::scaling::{context::Context, flag::Flags};
 use ffmpeg::util::frame::video::Video;
+use ffmpeg::codec::threading::Type as ThreadingType;
 use std::env;
 use std::{ptr, slice};
 // use std::fs::File;
@@ -47,16 +48,29 @@ fn decode_video_and_ocr() -> Result<()> {
     ffmpeg::init().unwrap();
 
     if let Ok(mut ictx) = input(&env::args().nth(1).expect("Cannot open file.")) {
+
         let input = ictx
             .streams()
             .best(Type::Video)
             .ok_or(ffmpeg::Error::StreamNotFound)?;
         let video_stream_index = input.index();
 
+
         let frames = input.frames();
         println!("frame: {}", frames);
 
-        let context_decoder = ffmpeg::codec::context::Context::from_parameters(input.parameters())?;
+        let mut context_decoder = ffmpeg::codec::context::Context::from_parameters(input.parameters())?;
+        let mut thread = context_decoder.threading();
+
+        let process = 6;
+        thread.count = process;
+        thread.kind = ThreadingType::Frame;
+        println!("thread: {}, type: {:?}", thread.count, thread.kind);
+
+        context_decoder.set_threading(thread);
+        // let  new_thread = context_decoder.threading();
+        // println!("new thread: {}, type: {:?}", new_thread.count, new_thread.kind);
+
         let mut decoder = context_decoder.decoder().video()?;
 
         let mut scaler = Context::get(
@@ -74,17 +88,12 @@ fn decode_video_and_ocr() -> Result<()> {
         let mut frame_index = 0;
 
         let mut receive_and_process_decoded_frames =
-            |decoder: &mut ffmpeg::decoder::Video| -> Result<(), ffmpeg::Error> {
+            |decoder: &mut ffmpeg::decoder::Video| -> Result<(), anyhow::Error> {
                 let mut decoded = Video::empty();
                 while decoder.receive_frame(&mut decoded).is_ok() {
-                    // if frame_index % 5 > 0 {
-                    //     frame_index += 1;
-                    //     continue;
-                    // }
-
                     let mut rgb_frame = Video::empty();
                     scaler.run(&decoded, &mut rgb_frame)?;
-                    futures::executor::block_on(do_ocr(&rgb_frame, frame_index));
+                    futures::executor::block_on(do_ocr(&rgb_frame, frame_index))?;
                     // save_file(&rgb_frame, frame_index).unwrap();
                     frame_index += 1;
                 }
@@ -151,18 +160,18 @@ async fn do_ocr(frame: &Video, index: usize) -> std::result::Result<(), std::io:
             // c[3] = 255;
         });
     }
-    let zh_tw = OcrEngine::AvailableRecognizerLanguages().unwrap().GetAt(1).unwrap();
+    // let zh_tw = OcrEngine::AvailableRecognizerLanguages().unwrap().GetAt(1).unwrap();
 
-    // let engine = OcrEngine::TryCreateFromUserProfileLanguages()?;
-    let engine = OcrEngine::TryCreateFromLanguage(&zh_tw)?;
+    // // let engine = OcrEngine::TryCreateFromUserProfileLanguages()?;
+    // let engine = OcrEngine::TryCreateFromLanguage(&zh_tw)?;
 
-    // let lang2 = GlobalizationPreferences::Languages();
-    // println!("lang: {:?}", lang2);
+    // // let lang2 = GlobalizationPreferences::Languages();
+    // // println!("lang: {:?}", lang2);
 
-    let result = engine.RecognizeAsync(&bmp)?.await?;
+    // let result = engine.RecognizeAsync(&bmp)?.await?;
 
 
-    println!("{:?}", result.Text()?.to_string());
+    // println!("{:?}", result.Text()?.to_string());
 
     Ok(())
 }
