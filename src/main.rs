@@ -6,7 +6,7 @@ use ffmpeg::media::Type;
 use ffmpeg::software::scaling::{context::Context, flag::Flags};
 use ffmpeg::util::frame::video::Video;
 use std::env;
-use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::mpsc::{self, Sender};
 use std::thread;
 use std::{ptr, slice};
 // use std::fs::File;
@@ -85,9 +85,21 @@ fn decode_video_and_ocr() -> Result<()> {
             // receiver_vec.push(receiver);
 
             thread::spawn(|| -> Result<()> {
+                let zh_tw = OcrEngine::AvailableRecognizerLanguages()
+                    .unwrap()
+                    .GetAt(1)
+                    .unwrap();
+
+                // let engine = OcrEngine::TryCreateFromUserProfileLanguages()?;
+                let engine = OcrEngine::TryCreateFromLanguage(&zh_tw)?;
+
+                // let lang2 = GlobalizationPreferences::Languages();
+                // println!("lang: {:?}", lang2);
+
                 for msg in receiver {
-                    // do_ocr(&msg.frame, msg.index);
-                    futures::executor::block_on(do_ocr(&msg.frame, msg.index))?;
+                    let result =
+                        futures::executor::block_on(do_ocr(&engine, &msg.frame, msg.index))?;
+                    println!("{:?}", result);
                 }
 
                 Ok(())
@@ -146,16 +158,11 @@ fn decode_video_and_ocr() -> Result<()> {
     Ok(())
 }
 
-// fn receive_frame_and_do_ocr(receiver: Receiver<FrameMsg>) -> Result<()> {
-//     for msg in receiver {
-//         // do_ocr(&msg.frame, msg.index);
-//         futures::executor::block_on(do_ocr(&msg.frame, msg.index))?;
-//     }
-
-//     Ok(())
-// }
-
-async fn do_ocr(frame: &Video, index: usize) -> std::result::Result<(), std::io::Error> {
+async fn do_ocr(
+    engine: &OcrEngine,
+    frame: &Video,
+    index: usize,
+) -> std::result::Result<String, std::io::Error> {
     println!("{:?}", index);
 
     let rgb = frame.data(0);
@@ -202,17 +209,7 @@ async fn do_ocr(frame: &Video, index: usize) -> std::result::Result<(), std::io:
             // c[3] = 255;
         });
     }
-    // let zh_tw = OcrEngine::AvailableRecognizerLanguages().unwrap().GetAt(1).unwrap();
 
-    // // let engine = OcrEngine::TryCreateFromUserProfileLanguages()?;
-    // let engine = OcrEngine::TryCreateFromLanguage(&zh_tw)?;
-
-    // // let lang2 = GlobalizationPreferences::Languages();
-    // // println!("lang: {:?}", lang2);
-
-    // let result = engine.RecognizeAsync(&bmp)?.await?;
-
-    // println!("{:?}", result.Text()?.to_string());
-
-    Ok(())
+    let result = engine.RecognizeAsync(&bmp)?.await?;
+    Ok(result.Text()?.to_string())
 }
