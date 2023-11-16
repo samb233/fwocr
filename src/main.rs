@@ -1,11 +1,13 @@
 extern crate ffmpeg_next as ffmpeg;
 
+use ffmpeg::codec::threading::Type as ThreadingType;
 use ffmpeg::format::{input, Pixel};
 use ffmpeg::media::Type;
 use ffmpeg::software::scaling::{context::Context, flag::Flags};
 use ffmpeg::util::frame::video::Video;
-use ffmpeg::codec::threading::Type as ThreadingType;
 use std::env;
+use std::sync::mpsc::{self, Receiver, Sender};
+use std::thread;
 use std::{ptr, slice};
 // use std::fs::File;
 // use std::io::prelude::*;
@@ -14,9 +16,9 @@ use anyhow::Result;
 
 use windows::{
     core::*,
-    System::UserProfile::GlobalizationPreferences,
-    Graphics::Imaging::{SoftwareBitmap, BitmapPixelFormat, BitmapBufferAccessMode},
+    Graphics::Imaging::{BitmapBufferAccessMode, BitmapPixelFormat, SoftwareBitmap},
     Media::Ocr::OcrEngine,
+    System::UserProfile::GlobalizationPreferences,
     Win32::System::WinRT::*,
 };
 
@@ -43,26 +45,29 @@ fn main() -> Result<()> {
     decode_video_and_ocr()
 }
 
+struct FrameMsg {
+    index: usize,
+    frame: Video,
+}
 
 fn decode_video_and_ocr() -> Result<()> {
     ffmpeg::init().unwrap();
 
     if let Ok(mut ictx) = input(&env::args().nth(1).expect("Cannot open file.")) {
-
         let input = ictx
             .streams()
             .best(Type::Video)
             .ok_or(ffmpeg::Error::StreamNotFound)?;
         let video_stream_index = input.index();
 
-
         let frames = input.frames();
         println!("frame: {}", frames);
 
-        let mut context_decoder = ffmpeg::codec::context::Context::from_parameters(input.parameters())?;
+        let mut context_decoder =
+            ffmpeg::codec::context::Context::from_parameters(input.parameters())?;
         let mut thread = context_decoder.threading();
 
-        let process = 6;
+        let process: usize = 6;
         thread.count = process;
         thread.kind = ThreadingType::Frame;
         println!("thread: {}, type: {:?}", thread.count, thread.kind);
@@ -70,6 +75,24 @@ fn decode_video_and_ocr() -> Result<()> {
         context_decoder.set_threading(thread);
         // let  new_thread = context_decoder.threading();
         // println!("new thread: {}, type: {:?}", new_thread.count, new_thread.kind);
+
+        // let mut receiver_vec: Vec<Receiver<FrameMsg>> = Vec::new();
+        let mut sender_vec: Vec<Sender<FrameMsg>> = Vec::new();
+
+        for _ in 0..process {
+            let (sender, receiver) = mpsc::channel();
+            sender_vec.push(sender);
+            // receiver_vec.push(receiver);
+
+            thread::spawn(|| -> Result<()> {
+                for msg in receiver {
+                    // do_ocr(&msg.frame, msg.index);
+                    futures::executor::block_on(do_ocr(&msg.frame, msg.index))?;
+                }
+
+                Ok(())
+            });
+        }
 
         let mut decoder = context_decoder.decoder().video()?;
 
@@ -89,11 +112,21 @@ fn decode_video_and_ocr() -> Result<()> {
 
         let mut receive_and_process_decoded_frames =
             |decoder: &mut ffmpeg::decoder::Video| -> Result<(), anyhow::Error> {
+                let sender_index = frame_index % process;
+                let sender = &sender_vec[sender_index];
+
                 let mut decoded = Video::empty();
                 while decoder.receive_frame(&mut decoded).is_ok() {
                     let mut rgb_frame = Video::empty();
                     scaler.run(&decoded, &mut rgb_frame)?;
-                    futures::executor::block_on(do_ocr(&rgb_frame, frame_index))?;
+
+                    let msg = FrameMsg {
+                        index: frame_index,
+                        frame: rgb_frame,
+                    };
+                    sender.send(msg).unwrap();
+
+                    // futures::executor::block_on(do_ocr(&rgb_frame, frame_index))?;
                     // save_file(&rgb_frame, frame_index).unwrap();
                     frame_index += 1;
                 }
@@ -112,6 +145,15 @@ fn decode_video_and_ocr() -> Result<()> {
 
     Ok(())
 }
+
+// fn receive_frame_and_do_ocr(receiver: Receiver<FrameMsg>) -> Result<()> {
+//     for msg in receiver {
+//         // do_ocr(&msg.frame, msg.index);
+//         futures::executor::block_on(do_ocr(&msg.frame, msg.index))?;
+//     }
+
+//     Ok(())
+// }
 
 async fn do_ocr(frame: &Video, index: usize) -> std::result::Result<(), std::io::Error> {
     println!("{:?}", index);
@@ -169,7 +211,6 @@ async fn do_ocr(frame: &Video, index: usize) -> std::result::Result<(), std::io:
     // // println!("lang: {:?}", lang2);
 
     // let result = engine.RecognizeAsync(&bmp)?.await?;
-
 
     // println!("{:?}", result.Text()?.to_string());
 
