@@ -105,8 +105,7 @@ fn decode_video_and_ocr() -> Result<()> {
                 // println!("lang: {:?}", lang2);
 
                 for msg in receiver {
-                    let result =
-                        futures::executor::block_on(do_ocr(&engine, &msg.frame))?;
+                    let result = futures::executor::block_on(do_ocr(&engine, &msg.frame))?;
 
                     let sub_msg = SubMsg {
                         index: msg.index,
@@ -122,7 +121,10 @@ fn decode_video_and_ocr() -> Result<()> {
 
         thread::spawn(move || {
             for msg in sub_receiver {
-                println!("index: {}, sub: {}", msg.index, msg.sub);
+                let sub = msg.sub.to_string();
+                let sub_handled = after_handle(&sub);
+
+                println!("index: {}, sub: {}", msg.index, sub_handled);
             }
 
             // TODO:
@@ -183,6 +185,11 @@ fn decode_video_and_ocr() -> Result<()> {
     Ok(())
 }
 
+fn after_handle(s: &str) -> &str {
+    let s_trim = s.trim();
+    remove_not_chinese_left(s_trim)
+}
+
 async fn do_ocr(engine: &OcrEngine, frame: &Video) -> std::result::Result<String, std::io::Error> {
     // println!("{:?}", index);
 
@@ -209,7 +216,7 @@ async fn do_ocr(engine: &OcrEngine, frame: &Video) -> std::result::Result<String
 
         let slice = unsafe { slice::from_raw_parts_mut(data, capacity as usize) };
         slice.chunks_mut(1).enumerate().for_each(|(i, c)| {
-            c[0] = if croped_rgb[i] >= 252 {
+            c[0] = if croped_rgb[i] >= 250 {
                 croped_rgb[i]
             } else {
                 20
@@ -233,4 +240,60 @@ async fn do_ocr(engine: &OcrEngine, frame: &Video) -> std::result::Result<String
 
     let result = engine.RecognizeAsync(&bmp)?.await?;
     Ok(result.Text()?.to_string())
+}
+
+fn remove_not_chinese_left(s: &str) -> &str {
+    let mut not_chinese_index = 0;
+
+    for c in s.chars() {
+        if is_chinese_char(c) {
+            break;
+        }
+
+        not_chinese_index += 1
+    }
+
+    if not_chinese_index == 0 {
+        return s;
+    } else {
+        utf8_slice::from(s, not_chinese_index)
+    }
+}
+
+fn is_chinese_char(ch: char) -> bool {
+    match ch as u32 {
+        0x4e00..=0x9fff => true,
+        // 0xff0c => false,           //，
+        // 0x3002 => false,           //。
+        // 0x3400..=0x4dbf => true,   // CJK Unified Ideographs Extension A
+        // 0x20000..=0x2a6df => true, // CJK Unified Ideographs Extension B
+        // 0x2a700..=0x2b73f => true, // CJK Unified Ideographs Extension C
+        // 0x2b740..=0x2b81f => true, // CJK Unified Ideographs Extension D
+        // 0x2b820..=0x2ceaf => true, // CJK Unified Ideographs Extension E
+        // 0x3300..=0x33ff => true,   // https://en.wikipedia.org/wiki/CJK_Compatibility
+        // 0xfe30..=0xfe4f => true,   // https://en.wikipedia.org/wiki/CJK_Compatibility_Forms
+        // 0xf900..=0xfaff => true,   // https://en.wikipedia.org/wiki/CJK_Compatibility_Ideographs
+        // 0x2f800..=0x2fa1f => true, // https://en.wikipedia.org/wiki/CJK_Compatibility_Ideographs_Supplement
+        // 0x00b7 => false,           //·
+        // 0x00d7 => false,           //×
+        // 0x2014 => false,           //—
+        // 0x2018 => false,           //‘
+        // 0x2019 => false,           //’
+        // 0x201c => false,           //“
+        // 0x201d => false,           //”
+        // 0x2026 => false,           //…
+        // 0x3001 => false,           //、
+        // 0x300a => false,           //《
+        // 0x300b => false,           //》
+        // 0x300e => false,           //『
+        // 0x300f => false,           //』
+        // 0x3010 => false,           //【
+        // 0x3011 => false,           //】
+        // 0xff01 => false,           //！
+        // 0xff08 => false,           //（
+        // 0xff09 => false,           //）
+        // 0xff1a => false,           //：
+        // 0xff1f => false,           //？
+        _ => false,
+    }
 }
