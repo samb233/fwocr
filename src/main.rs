@@ -5,7 +5,9 @@ use ffmpeg::format::{input, Pixel};
 use ffmpeg::media::Type;
 use ffmpeg::software::scaling::{context::Context, flag::Flags};
 use ffmpeg::util::frame::video::Video;
+use std::collections::HashMap;
 use std::env;
+use std::io::{BufRead, BufReader, Error, Write};
 use std::sync::mpsc::{self, Sender};
 use std::thread;
 use std::{ptr, slice};
@@ -119,18 +121,30 @@ fn decode_video_and_ocr() -> Result<()> {
             });
         }
 
-        thread::spawn(move || {
-            for msg in sub_receiver {
-                let sub = msg.sub.to_string();
-                let sub_handled = after_handle(&sub);
-
-                println!("index: {}, sub: {}", msg.index, sub_handled);
-            }
-
+        let res = thread::spawn(move || -> Vec<String> {
             // TODO:
             // 1. 文字后处理
             // 2. 存入到数组
             // 3. 当计数每一帧都处理之后，结束当前线程
+
+            let mut v: Vec<String> = vec![String::from("");frames as usize + 1];
+            let mut count = 1;
+
+            for msg in sub_receiver {
+                let sub = msg.sub.to_string();
+                let sub_handled = after_handle(&sub);
+                let s = String::from(sub_handled);
+
+                // println!("index: {}, sub: {}", msg.index, sub_handled);
+                v[msg.index] = s;
+
+                count += 1;
+                if count == frames {
+                    break;
+                }
+            }
+
+            v
         });
 
         let mut decoder = context_decoder.decoder().video()?;
@@ -180,6 +194,15 @@ fn decode_video_and_ocr() -> Result<()> {
         }
         decoder.send_eof()?;
         receive_and_process_decoded_frames(&mut decoder)?;
+
+        let res_v = res.join().unwrap();
+
+        let mut file = std::fs::File::create("test.txt")?;
+        let mut frame_index = 1;
+        for sub in &res_v {
+            write!(file, "index: {}, sub: {}\n", frame_index, sub)?;
+            frame_index += 1
+        }
     }
 
     Ok(())
@@ -216,25 +239,12 @@ async fn do_ocr(engine: &OcrEngine, frame: &Video) -> std::result::Result<String
 
         let slice = unsafe { slice::from_raw_parts_mut(data, capacity as usize) };
         slice.chunks_mut(1).enumerate().for_each(|(i, c)| {
-            c[0] = if croped_rgb[i] >= 250 {
+            // c[0] = croped_rgb[i]
+            c[0] = if croped_rgb[i] >= 225 {
                 croped_rgb[i]
             } else {
-                20
+                0
             }
-            // let r = croped_rgb[3 * i];
-            // let g = croped_rgb[3 * i + 1];
-            // let b = croped_rgb[3 * i + 2];
-
-            // if r > 240 && g > 240 && b > 240 {
-            //     c[0] = croped_rgb[3 * i];
-            //     c[1] = croped_rgb[3 * i + 1];
-            //     c[2] = croped_rgb[3 * i + 2];
-            // } else {
-            //     c[0] = 0;
-            //     c[1] = 0;
-            //     c[2] = 0;
-            // }
-            // c[3] = 255;
         });
     }
 
