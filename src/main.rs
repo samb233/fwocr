@@ -14,6 +14,8 @@ use std::{ptr, slice};
 // use std::fs::File;
 // use std::io::prelude::*;
 
+use pbr::MultiBar;
+
 use anyhow::Result;
 
 use windows::{
@@ -44,7 +46,8 @@ use windows::{
 // }
 
 fn main() -> Result<()> {
-    decode_video_and_ocr()
+    let filename = env::args().nth(1).expect("Cannot open file.");
+    decode_video_and_ocr(filename)
 }
 
 struct FrameMsg {
@@ -57,152 +60,169 @@ struct SubMsg {
     sub: String,
 }
 
-fn decode_video_and_ocr() -> Result<()> {
+struct Subtitle {
+    start_frame: usize,
+    end_frame: usize,
+    text: String,
+}
+
+fn decode_video_and_ocr(filename: String) -> Result<()> {
     ffmpeg::init().unwrap();
 
-    if let Ok(mut ictx) = input(&env::args().nth(1).expect("Cannot open file.")) {
-        let input = ictx
-            .streams()
-            .best(Type::Video)
-            .ok_or(ffmpeg::Error::StreamNotFound)?;
-        let video_stream_index = input.index();
+    let mut ictx = input(&filename)?;
+    let input = ictx
+        .streams()
+        .best(Type::Video)
+        .ok_or(ffmpeg::Error::StreamNotFound)?;
+    let video_stream_index = input.index();
 
-        let frames = input.frames();
-        println!("frame: {}", frames);
+    let frames = input.frames();
+    println!("frame: {}", frames);
 
-        let mut context_decoder =
-            ffmpeg::codec::context::Context::from_parameters(input.parameters())?;
-        let mut thread = context_decoder.threading();
+    let mut context_decoder = ffmpeg::codec::context::Context::from_parameters(input.parameters())?;
+    let mut thread = context_decoder.threading();
 
-        let process: usize = 6;
-        thread.count = process;
-        thread.kind = ThreadingType::Frame;
-        println!("thread: {}, type: {:?}", thread.count, thread.kind);
+    let process: usize = 6;
+    thread.count = process;
+    thread.kind = ThreadingType::Frame;
+    println!("thread: {}, type: {:?}", thread.count, thread.kind);
 
-        context_decoder.set_threading(thread);
-        // let  new_thread = context_decoder.threading();
-        // println!("new thread: {}, type: {:?}", new_thread.count, new_thread.kind);
+    context_decoder.set_threading(thread);
+    // let  new_thread = context_decoder.threading();
+    // println!("new thread: {}, type: {:?}", new_thread.count, new_thread.kind);
 
-        // let mut receiver_vec: Vec<Receiver<FrameMsg>> = Vec::new();
-        let mut sender_vec: Vec<Sender<FrameMsg>> = Vec::new();
+    // let mut receiver_vec: Vec<Receiver<FrameMsg>> = Vec::new();
+    let mut sender_vec: Vec<Sender<FrameMsg>> = Vec::new();
 
-        let (sub_sender, sub_receiver) = mpsc::channel();
+    let (sub_sender, sub_receiver) = mpsc::channel();
 
-        for _ in 0..process {
-            let (sender, receiver) = mpsc::channel();
-            sender_vec.push(sender);
+    for _ in 0..process {
+        let (sender, receiver) = mpsc::channel();
+        sender_vec.push(sender);
 
-            let sub_sender_n = sub_sender.clone();
+        let sub_sender_n = sub_sender.clone();
 
-            thread::spawn(move || -> Result<()> {
-                let zh_tw = OcrEngine::AvailableRecognizerLanguages()
-                    .unwrap()
-                    .GetAt(1)
-                    .unwrap();
+        thread::spawn(move || -> Result<()> {
+            let zh_tw = OcrEngine::AvailableRecognizerLanguages()
+                .unwrap()
+                .GetAt(1)
+                .unwrap();
 
-                // let engine = OcrEngine::TryCreateFromUserProfileLanguages()?;
-                let engine = OcrEngine::TryCreateFromLanguage(&zh_tw)?;
+            // let engine = OcrEngine::TryCreateFromUserProfileLanguages()?;
+            let engine = OcrEngine::TryCreateFromLanguage(&zh_tw)?;
 
-                // let lang2 = GlobalizationPreferences::Languages();
-                // println!("lang: {:?}", lang2);
+            // let lang2 = GlobalizationPreferences::Languages();
+            // println!("lang: {:?}", lang2);
 
-                for msg in receiver {
-                    let result = futures::executor::block_on(do_ocr(&engine, &msg.frame))?;
+            for msg in receiver {
+                let result = futures::executor::block_on(do_ocr(&engine, &msg.frame))?;
 
-                    let sub_msg = SubMsg {
-                        index: msg.index,
-                        sub: result,
-                    };
+                let sub_msg = SubMsg {
+                    index: msg.index,
+                    sub: result,
+                };
 
-                    sub_sender_n.send(sub_msg).unwrap();
-                }
-
-                Ok(())
-            });
-        }
-
-        let res = thread::spawn(move || -> Vec<String> {
-            // TODO:
-            // 1. 文字后处理
-            // 2. 存入到数组
-            // 3. 当计数每一帧都处理之后，结束当前线程
-
-            let mut v: Vec<String> = vec![String::from("");frames as usize + 1];
-            let mut count = 1;
-
-            for msg in sub_receiver {
-                let sub = msg.sub.to_string();
-                let sub_handled = after_handle(&sub);
-                let s = String::from(sub_handled);
-
-                // println!("index: {}, sub: {}", msg.index, sub_handled);
-                v[msg.index] = s;
-
-                count += 1;
-                if count == frames {
-                    break;
-                }
+                sub_sender_n.send(sub_msg).unwrap();
             }
 
-            v
+            Ok(())
         });
+    }
 
-        let mut decoder = context_decoder.decoder().video()?;
+    let res = thread::spawn(move || -> Vec<String> {
+        // TODO:
+        // 1. 文字后处理
+        // 2. 存入到数组
+        // 3. 当计数每一帧都处理之后，结束当前线程
 
-        let mut scaler = Context::get(
-            decoder.format(),
-            decoder.width(),
-            decoder.height(),
-            Pixel::GRAY8,
-            960,
-            540,
-            // decoder.width() / 2,
-            // decoder.height() / 2,
-            Flags::BILINEAR,
-        )?;
+        let mut v: Vec<String> = vec![String::from(""); frames as usize + 1];
+        let mut count = 1;
 
-        let mut frame_index = 0;
+        for msg in sub_receiver {
+            let sub = msg.sub.to_string();
+            let sub_handled = after_handle(&sub);
+            let s = String::from(sub_handled);
 
-        let mut receive_and_process_decoded_frames =
-            |decoder: &mut ffmpeg::decoder::Video| -> Result<(), anyhow::Error> {
-                let sender_index = frame_index % process;
-                let sender = &sender_vec[sender_index];
+            // println!("index: {}, sub: {}", msg.index, sub_handled);
+            v[msg.index] = s;
 
-                let mut decoded = Video::empty();
-                while decoder.receive_frame(&mut decoded).is_ok() {
-                    let mut rgb_frame = Video::empty();
-                    scaler.run(&decoded, &mut rgb_frame)?;
-
-                    let msg = FrameMsg {
-                        index: frame_index,
-                        frame: rgb_frame,
-                    };
-                    sender.send(msg).unwrap();
-
-                    // futures::executor::block_on(do_ocr(&rgb_frame, frame_index))?;
-                    // save_file(&rgb_frame, frame_index).unwrap();
-                    frame_index += 1;
-                }
-                Ok(())
-            };
-
-        for (stream, packet) in ictx.packets() {
-            if stream.index() == video_stream_index {
-                decoder.send_packet(&packet)?;
-                receive_and_process_decoded_frames(&mut decoder)?;
+            count += 1;
+            if count == frames {
+                break;
             }
         }
-        decoder.send_eof()?;
-        receive_and_process_decoded_frames(&mut decoder)?;
 
-        let res_v = res.join().unwrap();
+        v
+    });
 
-        let mut file = std::fs::File::create("test.txt")?;
-        let mut frame_index = 1;
-        for sub in &res_v {
-            write!(file, "index: {}, sub: {}\n", frame_index, sub)?;
-            frame_index += 1
+    let mut decoder = context_decoder.decoder().video()?;
+
+    let mut scaler = Context::get(
+        decoder.format(),
+        decoder.width(),
+        decoder.height(),
+        Pixel::GRAY8,
+        960,
+        540,
+        // decoder.width() / 2,
+        // decoder.height() / 2,
+        Flags::SPLINE,
+    )?;
+
+    let mut frame_index = 0;
+
+    let mut receive_and_process_decoded_frames =
+        |decoder: &mut ffmpeg::decoder::Video| -> Result<(), anyhow::Error> {
+            let sender_index = frame_index % process;
+            let sender = &sender_vec[sender_index];
+
+            let mut decoded = Video::empty();
+            while decoder.receive_frame(&mut decoded).is_ok() {
+                let mut rgb_frame = Video::empty();
+                scaler.run(&decoded, &mut rgb_frame)?;
+
+                let msg = FrameMsg {
+                    index: frame_index,
+                    frame: rgb_frame,
+                };
+                sender.send(msg).unwrap();
+
+                // futures::executor::block_on(do_ocr(&rgb_frame, frame_index))?;
+                // save_file(&rgb_frame, frame_index).unwrap();
+                frame_index += 1;
+            }
+            Ok(())
+        };
+
+    for (stream, packet) in ictx.packets() {
+        if stream.index() == video_stream_index {
+            decoder.send_packet(&packet)?;
+            receive_and_process_decoded_frames(&mut decoder)?;
         }
+    }
+    decoder.send_eof()?;
+    receive_and_process_decoded_frames(&mut decoder)?;
+
+    let res_v = res.join().unwrap();
+
+    let mut file = std::fs::File::create("test.txt")?;
+    // let mut frame_index = 1;
+
+    for mut i in 0..frames {
+        let sub = res_v.get(i as usize).unwrap();
+        write!(file, "index: {}, sub: {}\n", i, sub)?;
+
+        // if sub.len() == 0 {
+        //     continue;
+        // }
+
+        // let end_index = i + 1;
+        // for end in i+1..frames{
+        //     let next_sub = res_v.get(end as usize).unwrap();
+        //     if next_sub.len() == 0 {
+
+        //     }
+        // }
     }
 
     Ok(())
@@ -210,7 +230,8 @@ fn decode_video_and_ocr() -> Result<()> {
 
 fn after_handle(s: &str) -> &str {
     let s_trim = s.trim();
-    remove_not_chinese_left(s_trim)
+    s_trim
+    // remove_not_chinese_left(s_trim)
 }
 
 async fn do_ocr(engine: &OcrEngine, frame: &Video) -> std::result::Result<String, std::io::Error> {
@@ -219,7 +240,7 @@ async fn do_ocr(engine: &OcrEngine, frame: &Video) -> std::result::Result<String
     let rgb = frame.data(0);
     let width = 960;
     let height = 540;
-    let croped_height = height / 5;
+    let croped_height = height / 6;
     let croped_pixels = width * (height - croped_height);
     let croped_rgb = &rgb[croped_pixels as usize..];
 
@@ -240,7 +261,7 @@ async fn do_ocr(engine: &OcrEngine, frame: &Video) -> std::result::Result<String
         let slice = unsafe { slice::from_raw_parts_mut(data, capacity as usize) };
         slice.chunks_mut(1).enumerate().for_each(|(i, c)| {
             // c[0] = croped_rgb[i]
-            c[0] = if croped_rgb[i] >= 225 {
+            c[0] = if croped_rgb[i] > 220 {
                 croped_rgb[i]
             } else {
                 0
@@ -252,23 +273,23 @@ async fn do_ocr(engine: &OcrEngine, frame: &Video) -> std::result::Result<String
     Ok(result.Text()?.to_string())
 }
 
-fn remove_not_chinese_left(s: &str) -> &str {
-    let mut not_chinese_index = 0;
+// fn remove_not_chinese_left(s: &str) -> &str {
+//     let mut not_chinese_index = 0;
 
-    for c in s.chars() {
-        if is_chinese_char(c) {
-            break;
-        }
+//     for c in s.chars() {
+//         if is_chinese_char(c) {
+//             break;
+//         }
 
-        not_chinese_index += 1
-    }
+//         not_chinese_index += 1
+//     }
 
-    if not_chinese_index == 0 {
-        return s;
-    } else {
-        utf8_slice::from(s, not_chinese_index)
-    }
-}
+//     if not_chinese_index == 0 {
+//         return s;
+//     } else {
+//         utf8_slice::from(s, not_chinese_index)
+//     }
+// }
 
 fn is_chinese_char(ch: char) -> bool {
     match ch as u32 {
