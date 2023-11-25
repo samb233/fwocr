@@ -14,7 +14,7 @@ use std::{ptr, slice};
 // use std::fs::File;
 // use std::io::prelude::*;
 
-use indicatif::{MultiProgress, ProgressBar, ProgressStyle, ProgressState};
+use indicatif::{MultiProgress, ProgressBar, ProgressState, ProgressStyle};
 
 use anyhow::Result;
 
@@ -268,24 +268,71 @@ fn handle(sub_receiver: Receiver<SubMsg>, total: usize, pb: ProgressBar) -> Resu
     }
     pb.finish();
 
+    let mut subtitle_vec: Vec<Subtitle> = Vec::new();
+
+    let mut frame_index = 0;
+    while frame_index < total {
+        let sub = v.get(frame_index).unwrap();
+
+        if sub.len() == 0 {
+            frame_index += 1;
+            continue;
+        }
+
+        let mut end_index = frame_index + 1;
+        let mut sub_map: HashMap<String, i32> = HashMap::new();
+        for end in frame_index + 1..total {
+            let next_sub = v.get(end as usize).unwrap();
+
+            if next_sub.len() == 0 {
+                end_index = end;
+                break;
+            }
+
+            let mut both_count = 0;
+            for diff in diff::lines(sub, next_sub) {
+                match diff {
+                    diff::Result::Both(l, _) => both_count += l.len(),
+                    _ => continue,
+                }
+            }
+
+            if both_count == 0 {
+                end_index = end;
+                break;
+            }
+
+            let count = sub_map.entry(next_sub.clone()).or_insert(0);
+            *count += 1;
+        }
+
+        let mut max_count = 0;
+        let mut current_sub: String = String::new();
+        for (sub, count) in sub_map.iter() {
+            if *count > max_count {
+                max_count = *count;
+                current_sub = sub.clone();
+            }
+        }
+
+        let subtitle = Subtitle {
+            start_frame: frame_index,
+            end_frame: end_index,
+            text: current_sub,
+        };
+
+        subtitle_vec.push(subtitle);
+
+        frame_index = end_index + 1;
+    }
+
     let mut file = std::fs::File::create("test.txt")?;
-
-    let mut frame_index = 1;
-    for sub in v {
-        write!(file, "index: {}, sub: {}\n", frame_index, sub)?;
-        frame_index += 1;
-
-        // if sub.len() == 0 {
-        //     continue;
-        // }
-
-        // let end_index = i + 1;
-        // for end in i+1..frames{
-        //     let next_sub = res_v.get(end as usize).unwrap();
-        //     if next_sub.len() == 0 {
-
-        //     }
-        // }
+    for subtitle in subtitle_vec {
+        write!(
+            file,
+            "start: {}, end:{}, sub: {}\n",
+            subtitle.start_frame, subtitle.end_frame, subtitle.text
+        )?;
     }
 
     Ok(())
