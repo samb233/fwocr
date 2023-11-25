@@ -14,7 +14,7 @@ use std::{ptr, slice};
 // use std::fs::File;
 // use std::io::prelude::*;
 
-use pbr::MultiBar;
+use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 
 use anyhow::Result;
 
@@ -50,6 +50,18 @@ fn main() -> Result<()> {
     let thread_count = 4;
     let lang = 1;
 
+    let mb = MultiProgress::new();
+    let sty = ProgressStyle::with_template(
+        "[{elapsed_precise}] {bar:40.cyan/blue} {pos:>7}/{len:7} {msg}",
+    )
+    .unwrap()
+    .progress_chars("##-");
+
+    let decode_pb = mb.add(ProgressBar::new(35246));
+    decode_pb.set_style(sty.clone());
+
+    let ocr_pb = mb.add(ProgressBar::new(35246));
+    ocr_pb.set_style(sty.clone());
 
     let mut frame_senders: Vec<Sender<FrameMsg>> = Vec::new();
     let mut frame_receivers: Vec<Receiver<FrameMsg>> = Vec::new();
@@ -59,8 +71,7 @@ fn main() -> Result<()> {
         frame_receivers.push(frame_receiver);
     }
 
-
-    let decode_conf = DecoderConfig{
+    let decode_conf = DecoderConfig {
         filename,
         dst_format: Pixel::GRAY8,
         dst_w: 960,
@@ -70,21 +81,21 @@ fn main() -> Result<()> {
     };
 
     let (sub_sender, sub_receiver) = mpsc::channel();
-    let ocr_conf = OcrConfig{
+    let ocr_conf = OcrConfig {
         lang,
         frame_receivers,
         sub_sender,
     };
 
-    thread::spawn(move || -> Result<()> {
-        decode_video_and_ocr(decode_conf)
-    });
+    thread::spawn(move || -> Result<()> { decode_video_and_ocr(decode_conf, decode_pb) });
 
-    thread::spawn(move || -> Result<()> {
-        ocr(ocr_conf)
-    });
+    thread::spawn(move || -> Result<()> { ocr(ocr_conf) });
 
-    handle(sub_receiver, 30000)
+    let handle = thread::spawn(move || -> Result<()> { handle(sub_receiver, 35246, ocr_pb) });
+
+    handle.join().unwrap()?;
+    mb.clear().unwrap();
+    Ok(())
 }
 
 struct FrameMsg {
@@ -120,7 +131,7 @@ struct OcrConfig {
     sub_sender: Sender<SubMsg>,
 }
 
-fn decode_video_and_ocr(conf: DecoderConfig) -> Result<()> {
+fn decode_video_and_ocr(conf: DecoderConfig, pb: ProgressBar) -> Result<()> {
     ffmpeg::init().unwrap();
 
     let mut ictx = input(&conf.filename)?;
@@ -131,8 +142,8 @@ fn decode_video_and_ocr(conf: DecoderConfig) -> Result<()> {
         .ok_or(ffmpeg::Error::StreamNotFound)?;
     let video_stream_index = input.index();
 
-    let frames = input.frames();
-    println!("frame: {}", frames);
+    // let frames = input.frames();
+    // println!("frame: {}", frames);
 
     let mut context_decoder = ffmpeg::codec::context::Context::from_parameters(input.parameters())?;
     let mut thread = context_decoder.threading();
@@ -140,7 +151,7 @@ fn decode_video_and_ocr(conf: DecoderConfig) -> Result<()> {
     let process: usize = conf.thread_count;
     thread.count = process;
     thread.kind = ThreadingType::Frame;
-    println!("thread: {}, type: {:?}", thread.count, thread.kind);
+    // println!("thread: {}, type: {:?}", thread.count, thread.kind);
 
     context_decoder.set_threading(thread);
     // let  new_thread = context_decoder.threading();
@@ -189,10 +200,14 @@ fn decode_video_and_ocr(conf: DecoderConfig) -> Result<()> {
         if stream.index() == video_stream_index {
             decoder.send_packet(&packet)?;
             receive_and_process_decoded_frames(&mut decoder)?;
+            pb.inc(1);
         }
     }
     decoder.send_eof()?;
     receive_and_process_decoded_frames(&mut decoder)?;
+
+    pb.inc(1);
+    pb.finish();
 
     Ok(())
 }
@@ -230,32 +245,28 @@ fn ocr(conf: OcrConfig) -> Result<()> {
     Ok(())
 }
 
-fn handle(sub_receiver: Receiver<SubMsg>, total: usize) -> Result<()> {
-    let res = thread::spawn(move || -> Vec<String> {
-        let mut v: Vec<String> = vec![String::from(""); total + 1];
-        let mut count = 1;
-        for msg in sub_receiver {
-            let sub = msg.sub.to_string();
-            let sub_handled = after_handle(&sub);
-            let s = String::from(sub_handled);
+fn handle(sub_receiver: Receiver<SubMsg>, total: usize, pb: ProgressBar) -> Result<()> {
+    let mut v: Vec<String> = vec![String::from(""); total + 1];
+    let mut count = 1;
+    for msg in sub_receiver {
+        let sub = msg.sub.to_string();
+        let sub_handled = after_handle(&sub);
+        let s = String::from(sub_handled);
 
-            v[msg.index] = s;
-            count += 1;
+        v[msg.index] = s;
+        count += 1;
+        pb.inc(1);
 
-            if count == total {
-                break;
-            }
+        if count == total {
+            break;
         }
-
-        v
-    });
-
-    let res_v = res.join().unwrap();
+    }
+    pb.finish();
 
     let mut file = std::fs::File::create("test.txt")?;
 
     let mut frame_index = 1;
-    for sub in res_v {
+    for sub in v {
         write!(file, "index: {}, sub: {}\n", frame_index, sub)?;
         frame_index += 1;
 

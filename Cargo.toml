@@ -13,4 +13,4 @@ futures = "0.3.29"
 clap = { version = "4.4.8", features = ["derive"] }
 utf8_slice = "1.0.0"
 diff = "0.1.13"
-pbr = "1.1.1"
+indicatif = "0.17.7"
