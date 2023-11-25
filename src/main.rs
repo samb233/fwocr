@@ -8,7 +8,7 @@ use ffmpeg::util::frame::video::Video;
 use std::collections::HashMap;
 use std::env;
 use std::io::{BufRead, BufReader, Error, Write};
-use std::sync::mpsc::{self, Sender};
+use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
 use std::{ptr, slice};
 // use std::fs::File;
@@ -47,7 +47,44 @@ use windows::{
 
 fn main() -> Result<()> {
     let filename = env::args().nth(1).expect("Cannot open file.");
-    decode_video_and_ocr(filename)
+    let thread_count = 4;
+    let lang = 1;
+
+
+    let mut frame_senders: Vec<Sender<FrameMsg>> = Vec::new();
+    let mut frame_receivers: Vec<Receiver<FrameMsg>> = Vec::new();
+    for _ in 0..thread_count * 2 {
+        let (frame_sender, frame_receiver) = mpsc::channel();
+        frame_senders.push(frame_sender);
+        frame_receivers.push(frame_receiver);
+    }
+
+
+    let decode_conf = DecoderConfig{
+        filename,
+        dst_format: Pixel::GRAY8,
+        dst_w: 960,
+        dst_h: 540,
+        thread_count,
+        senders: frame_senders,
+    };
+
+    let (sub_sender, sub_receiver) = mpsc::channel();
+    let ocr_conf = OcrConfig{
+        lang,
+        frame_receivers,
+        sub_sender,
+    };
+
+    thread::spawn(move || -> Result<()> {
+        decode_video_and_ocr(decode_conf)
+    });
+
+    thread::spawn(move || -> Result<()> {
+        ocr(ocr_conf)
+    });
+
+    handle(sub_receiver, 30000)
 }
 
 struct FrameMsg {
@@ -66,10 +103,28 @@ struct Subtitle {
     text: String,
 }
 
-fn decode_video_and_ocr(filename: String) -> Result<()> {
+struct DecoderConfig {
+    filename: String,
+    dst_format: Pixel,
+    dst_w: u32,
+    dst_h: u32,
+
+    thread_count: usize,
+    senders: Vec<Sender<FrameMsg>>,
+}
+
+struct OcrConfig {
+    lang: u32,
+
+    frame_receivers: Vec<Receiver<FrameMsg>>,
+    sub_sender: Sender<SubMsg>,
+}
+
+fn decode_video_and_ocr(conf: DecoderConfig) -> Result<()> {
     ffmpeg::init().unwrap();
 
-    let mut ictx = input(&filename)?;
+    let mut ictx = input(&conf.filename)?;
+
     let input = ictx
         .streams()
         .best(Type::Video)
@@ -82,7 +137,7 @@ fn decode_video_and_ocr(filename: String) -> Result<()> {
     let mut context_decoder = ffmpeg::codec::context::Context::from_parameters(input.parameters())?;
     let mut thread = context_decoder.threading();
 
-    let process: usize = 6;
+    let process: usize = conf.thread_count;
     thread.count = process;
     thread.kind = ThreadingType::Frame;
     println!("thread: {}, type: {:?}", thread.count, thread.kind);
@@ -92,68 +147,6 @@ fn decode_video_and_ocr(filename: String) -> Result<()> {
     // println!("new thread: {}, type: {:?}", new_thread.count, new_thread.kind);
 
     // let mut receiver_vec: Vec<Receiver<FrameMsg>> = Vec::new();
-    let mut sender_vec: Vec<Sender<FrameMsg>> = Vec::new();
-
-    let (sub_sender, sub_receiver) = mpsc::channel();
-
-    for _ in 0..process {
-        let (sender, receiver) = mpsc::channel();
-        sender_vec.push(sender);
-
-        let sub_sender_n = sub_sender.clone();
-
-        thread::spawn(move || -> Result<()> {
-            let zh_tw = OcrEngine::AvailableRecognizerLanguages()
-                .unwrap()
-                .GetAt(1)
-                .unwrap();
-
-            // let engine = OcrEngine::TryCreateFromUserProfileLanguages()?;
-            let engine = OcrEngine::TryCreateFromLanguage(&zh_tw)?;
-
-            // let lang2 = GlobalizationPreferences::Languages();
-            // println!("lang: {:?}", lang2);
-
-            for msg in receiver {
-                let result = futures::executor::block_on(do_ocr(&engine, &msg.frame))?;
-
-                let sub_msg = SubMsg {
-                    index: msg.index,
-                    sub: result,
-                };
-
-                sub_sender_n.send(sub_msg).unwrap();
-            }
-
-            Ok(())
-        });
-    }
-
-    let res = thread::spawn(move || -> Vec<String> {
-        // TODO:
-        // 1. 文字后处理
-        // 2. 存入到数组
-        // 3. 当计数每一帧都处理之后，结束当前线程
-
-        let mut v: Vec<String> = vec![String::from(""); frames as usize + 1];
-        let mut count = 1;
-
-        for msg in sub_receiver {
-            let sub = msg.sub.to_string();
-            let sub_handled = after_handle(&sub);
-            let s = String::from(sub_handled);
-
-            // println!("index: {}, sub: {}", msg.index, sub_handled);
-            v[msg.index] = s;
-
-            count += 1;
-            if count == frames {
-                break;
-            }
-        }
-
-        v
-    });
 
     let mut decoder = context_decoder.decoder().video()?;
 
@@ -161,11 +154,9 @@ fn decode_video_and_ocr(filename: String) -> Result<()> {
         decoder.format(),
         decoder.width(),
         decoder.height(),
-        Pixel::GRAY8,
-        960,
-        540,
-        // decoder.width() / 2,
-        // decoder.height() / 2,
+        conf.dst_format,
+        conf.dst_w,
+        conf.dst_h,
         Flags::SPLINE,
     )?;
 
@@ -174,7 +165,7 @@ fn decode_video_and_ocr(filename: String) -> Result<()> {
     let mut receive_and_process_decoded_frames =
         |decoder: &mut ffmpeg::decoder::Video| -> Result<(), anyhow::Error> {
             let sender_index = frame_index % process;
-            let sender = &sender_vec[sender_index];
+            let sender = &conf.senders[sender_index];
 
             let mut decoded = Video::empty();
             while decoder.receive_frame(&mut decoded).is_ok() {
@@ -203,14 +194,70 @@ fn decode_video_and_ocr(filename: String) -> Result<()> {
     decoder.send_eof()?;
     receive_and_process_decoded_frames(&mut decoder)?;
 
+    Ok(())
+}
+
+fn ocr(conf: OcrConfig) -> Result<()> {
+    for receiver in conf.frame_receivers {
+        let sub_sender_n = conf.sub_sender.clone();
+
+        thread::spawn(move || -> Result<()> {
+            let lang = OcrEngine::AvailableRecognizerLanguages()
+                .unwrap()
+                .GetAt(conf.lang)
+                .unwrap();
+
+            // let engine = OcrEngine::TryCreateFromUserProfileLanguages()?;
+            let engine = OcrEngine::TryCreateFromLanguage(&lang)?;
+
+            // let lang2 = GlobalizationPreferences::Languages();
+            // println!("lang: {:?}", lang2);
+
+            for msg in receiver {
+                let result = futures::executor::block_on(do_ocr(&engine, &msg.frame))?;
+                let sub_msg = SubMsg {
+                    index: msg.index,
+                    sub: result,
+                };
+
+                sub_sender_n.send(sub_msg).unwrap();
+            }
+
+            Ok(())
+        });
+    }
+
+    Ok(())
+}
+
+fn handle(sub_receiver: Receiver<SubMsg>, total: usize) -> Result<()> {
+    let res = thread::spawn(move || -> Vec<String> {
+        let mut v: Vec<String> = vec![String::from(""); total + 1];
+        let mut count = 1;
+        for msg in sub_receiver {
+            let sub = msg.sub.to_string();
+            let sub_handled = after_handle(&sub);
+            let s = String::from(sub_handled);
+
+            v[msg.index] = s;
+            count += 1;
+
+            if count == total {
+                break;
+            }
+        }
+
+        v
+    });
+
     let res_v = res.join().unwrap();
 
     let mut file = std::fs::File::create("test.txt")?;
-    // let mut frame_index = 1;
 
-    for mut i in 0..frames {
-        let sub = res_v.get(i as usize).unwrap();
-        write!(file, "index: {}, sub: {}\n", i, sub)?;
+    let mut frame_index = 1;
+    for sub in res_v {
+        write!(file, "index: {}, sub: {}\n", frame_index, sub)?;
+        frame_index += 1;
 
         // if sub.len() == 0 {
         //     continue;
