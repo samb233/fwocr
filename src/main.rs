@@ -279,31 +279,40 @@ fn handle(sub_receiver: Receiver<SubMsg>, total: usize, pb: ProgressBar) -> Resu
             continue;
         }
 
-        let mut end_index = frame_index + 1;
+        let mut end_index = frame_index;
+
         let mut sub_map: HashMap<String, i32> = HashMap::new();
+        let count = sub_map.entry(sub.clone()).or_insert(0);
+        *count += 1;
+
         for end in frame_index + 1..total {
             let next_sub = v.get(end as usize).unwrap();
 
             if next_sub.len() == 0 {
-                end_index = end;
+                end_index = end - 1;
                 break;
             }
 
             let mut both_count = 0;
-            for diff in diff::lines(sub, next_sub) {
+            for diff in diff::chars(sub, next_sub) {
                 match diff {
-                    diff::Result::Both(l, _) => both_count += l.len(),
+                    diff::Result::Both(_, _) => both_count += 1,
                     _ => continue,
                 }
             }
 
             if both_count == 0 {
-                end_index = end;
+                end_index = end - 1;
                 break;
             }
 
             let count = sub_map.entry(next_sub.clone()).or_insert(0);
             *count += 1;
+        }
+
+        if sub_map.len() == 0 {
+            frame_index += 1;
+            continue;
         }
 
         let mut max_count = 0;
@@ -338,9 +347,8 @@ fn handle(sub_receiver: Receiver<SubMsg>, total: usize, pb: ProgressBar) -> Resu
     Ok(())
 }
 
-fn after_handle(s: &str) -> &str {
-    let s_trim = s.trim();
-    s_trim
+fn after_handle(s: &str) -> String {
+    s.replace(" ", "")
     // remove_not_chinese_left(s_trim)
 }
 
