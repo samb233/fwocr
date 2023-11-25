@@ -14,7 +14,7 @@ use std::{ptr, slice};
 // use std::fs::File;
 // use std::io::prelude::*;
 
-use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
+use indicatif::{MultiProgress, ProgressBar, ProgressStyle, ProgressState};
 
 use anyhow::Result;
 
@@ -47,25 +47,30 @@ use windows::{
 
 fn main() -> Result<()> {
     let filename = env::args().nth(1).expect("Cannot open file.");
-    let thread_count = 4;
+    let thread_count = 6;
     let lang = 1;
 
     let mb = MultiProgress::new();
-    let sty = ProgressStyle::with_template(
-        "[{elapsed_precise}] {bar:40.cyan/blue} {pos:>7}/{len:7} {msg}",
+    let decode_sty = ProgressStyle::with_template(
+        "Decode:{pos:>6}/{len:6} [{elapsed_precise}] (eta: {eta}) [{bar:40.cyan/blue}]",
     )
     .unwrap()
     .progress_chars("##-");
 
     let decode_pb = mb.add(ProgressBar::new(35246));
-    decode_pb.set_style(sty.clone());
+    decode_pb.set_style(decode_sty.clone());
 
+    let ocr_sty = ProgressStyle::with_template(
+        "OCR:   {pos:>6}/{len:6} [{elapsed_precise}] (eta: {eta}) [{bar:40.cyan/blue}]",
+    )
+    .unwrap()
+    .progress_chars("##-");
     let ocr_pb = mb.add(ProgressBar::new(35246));
-    ocr_pb.set_style(sty.clone());
+    ocr_pb.set_style(ocr_sty.clone());
 
     let mut frame_senders: Vec<Sender<FrameMsg>> = Vec::new();
     let mut frame_receivers: Vec<Receiver<FrameMsg>> = Vec::new();
-    for _ in 0..thread_count * 2 {
+    for _ in 0..thread_count {
         let (frame_sender, frame_receiver) = mpsc::channel();
         frame_senders.push(frame_sender);
         frame_receivers.push(frame_receiver);
