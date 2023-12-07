@@ -324,13 +324,24 @@ fn handle(sub_receiver: Receiver<SubMsg>, total: usize, pb: ProgressBar) -> Resu
             }
         }
 
-        let subtitle = Subtitle {
+        let mut subtitle = Subtitle {
             start_frame: frame_index,
             end_frame: end_index,
             text: current_sub,
         };
 
-        subtitle_vec.push(subtitle);
+        if subtitle_vec.len() > 0 {
+            let sub_last = subtitle_vec.pop().unwrap();
+            if sub.clone() == sub_last.text {
+                subtitle.start_frame = sub_last.start_frame;
+                subtitle_vec.push(subtitle);
+            } else {
+                subtitle_vec.push(sub_last);
+                subtitle_vec.push(subtitle);
+            }
+        } else {
+            subtitle_vec.push(subtitle);
+        }
 
         frame_index = end_index + 1;
     }
