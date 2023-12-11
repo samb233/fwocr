@@ -201,11 +201,31 @@ fn decode_video_and_ocr(conf: DecoderConfig, pb: ProgressBar) -> Result<()> {
             Ok(())
         };
 
+    let start_frame = 10000;
+    let mut frame_index = 0;
+    let mut is_seeking_key = true;
+
     for (stream, packet) in ictx.packets() {
         if stream.index() == video_stream_index {
+            if frame_index < start_frame {
+                frame_index += 1;
+                continue
+            }
+
+            if is_seeking_key {
+                if !packet.is_key() {
+                    frame_index += 1;
+                    continue
+                } else {
+                    is_seeking_key = false;
+                    println!("start_frame: {}", frame_index)
+                }
+            }
+
             decoder.send_packet(&packet)?;
             receive_and_process_decoded_frames(&mut decoder)?;
             pb.inc(1);
+
         }
     }
     decoder.send_eof()?;
