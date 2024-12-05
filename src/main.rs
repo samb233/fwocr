@@ -48,7 +48,7 @@ use windows::{
 fn main() -> Result<()> {
     let filename = env::args().nth(1).expect("Cannot open file.");
     let thread_count = 6;
-    let lang = 1;
+    let lang = 2;
 
     let mb = MultiProgress::new();
     let decode_sty = ProgressStyle::with_template(
@@ -201,7 +201,7 @@ fn decode_video_and_ocr(conf: DecoderConfig, pb: ProgressBar) -> Result<()> {
             Ok(())
         };
 
-    let start_frame = 10000;
+    let start_frame = 0;
     let mut frame_index = 0;
     let mut is_seeking_key = true;
 
@@ -209,13 +209,13 @@ fn decode_video_and_ocr(conf: DecoderConfig, pb: ProgressBar) -> Result<()> {
         if stream.index() == video_stream_index {
             if frame_index < start_frame {
                 frame_index += 1;
-                continue
+                continue;
             }
 
             if is_seeking_key {
                 if !packet.is_key() {
                     frame_index += 1;
-                    continue
+                    continue;
                 } else {
                     is_seeking_key = false;
                     println!("start_frame: {}", frame_index)
@@ -225,7 +225,6 @@ fn decode_video_and_ocr(conf: DecoderConfig, pb: ProgressBar) -> Result<()> {
             decoder.send_packet(&packet)?;
             receive_and_process_decoded_frames(&mut decoder)?;
             pb.inc(1);
-
         }
     }
     decoder.send_eof()?;
